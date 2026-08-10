@@ -38,6 +38,22 @@ python3 mikroskop_gui.py
    (`sonuc_grup1.png`, `sonuc_grup2.png`, ...) üretilir; tek grup varsa tek
    `sonuc.png` üretilir.
 
+## Siyah çevre kenarlığı (oküler vinyeti) otomatik kırpma
+
+Telefonla oküler üzerinden çekilen fotoğrafların çoğunda, dairesel görüş
+alanının dışında geniş bir siyah kenarlık olur. Bu kenarlık birleştirmeden
+önce kırpılmazsa, komşu fotoğrafların siyah kenarları yan yana gelip son
+görüntüde çirkin siyah şeritler/boşluklar oluşturur ve genel kaliteyi düşürür.
+
+Bu yüzden GUI'de **"Siyah çevre kenarlığını otomatik kırp"** kutucuğu
+(CLI'da varsayılan açık, kapatmak için `--kenar-kirp-kapat`) her fotoğrafı
+birleştirmeden önce otomatik olarak parlak/dairesel alanın sınır kutusuna
+kırpar. Koyu (yoğun boyalı) doku bölgeleri yanlışlıkla "arka plan"
+sayılmasın diye önce morfolojik kapama ile küçük boşluklar doldurulur.
+Fotoğrafta zaten böyle bir siyah kenarlık yoksa (örn. sıradan bir fotoğraf),
+tespit edilen alan neredeyse tüm kareyi kapladığından kırpma pratikte hiçbir
+şey yapmaz -- yani varsayılan olarak açık bırakmak güvenlidir.
+
 ## Komut satırından çalıştırma
 
 ```bash
@@ -90,3 +106,30 @@ kompozit üretebilirsiniz.
   korumalı (otomatik olarak manuel yönteme düşer) ve özellik çıkarımını her
   görüntü için yalnızca bir kez yapıp önbelleğe alır (büyük fotoğraf
   kümelerinde eskiye göre çok daha hızlıdır).
+
+## Parlama/gölge (pozlama farkı) dengeleme
+
+Manuel (graf) yöntem artık cv2.Stitcher'ın içeride yaptığına benzer bir
+**pozlama dengeleme** adımı içeriyor: komşu fotoğrafların örtüşen
+bölgesindeki parlaklık farkı ölçülüp, her görüntü birleştirilmeden önce
+otomatik olarak bu farkı azaltacak şekilde hafifçe karartılıp aydınlatılıyor.
+Bu, cv2.Stitcher kullanılamadığında ortaya çıkan görünür parlama/gölge
+sıçramalarını büyük ölçüde azaltır.
+
+**Önemli sınır:** Bu düzeltme yalnızca *orantılı* parlaklık farklarını
+giderir. Eğer orijinal fotoğrafta bir bölge gerçekten "yanmış" (piksel
+değerleri 255'e doygun, tamamen beyaz) durumdaysa, o bölgedeki bilgi zaten
+kaybolmuştur ve hiçbir çarpan/algoritma bunu geri getiremez -- böyle şiddetli
+lokal parlamalar için birleştirme sonrası bir görüntü düzenleyicide nokta
+düzeltmesi gerekebilir.
+
+## Çok sayıda görüntüde güvenlik (cv2.Stitcher çökmesi)
+
+cv2.Stitcher'ın iç eşleştirme adımları biraz rastgelelik içerir; bu yüzden
+özellikle 12'den fazla görüntüde, bozuk bir dönüşüm tahmininden dolayı
+bazen -try/except ile bile yakalanamayan, işletim sistemi tarafından anında
+sonlandırılan (OOM/bellek) çökmelere yol açabilir, ve bu davranış
+deterministik değildir (aynı girdiyle bazen olur bazen olmaz). Bu yüzden
+**12'den fazla görüntü içeren gruplarda cv2.Stitcher hiç denenmez**,
+doğrudan kendi boyut-sınırlı (kontrollü, asla bu şekilde çökmeyen)
+graf-tabanlı yönteme gidilir.

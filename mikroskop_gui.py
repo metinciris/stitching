@@ -82,6 +82,7 @@ class MikroskopArayuzu(tk.Tk):
         self.var_isik = tk.BooleanVar(value=True)
         self.var_vinyet = tk.BooleanVar(value=True)
         self.var_oto_grup = tk.BooleanVar(value=True)
+        self.var_kenar_kirp = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(secenek_cerceve, text="Işık/pozlama farklarını eşitle (CLAHE)",
                          variable=self.var_isik).grid(row=0, column=0, sticky="w", padx=4, pady=2)
@@ -89,6 +90,8 @@ class MikroskopArayuzu(tk.Tk):
                          variable=self.var_vinyet).grid(row=1, column=0, sticky="w", padx=4, pady=2)
         ttk.Checkbutton(secenek_cerceve, text="Farklı objektif/büyütmeleri otomatik ayır",
                          variable=self.var_oto_grup).grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        ttk.Checkbutton(secenek_cerceve, text="Siyah çevre kenarlığını (oküler dışı) otomatik kırp",
+                         variable=self.var_kenar_kirp).grid(row=3, column=0, sticky="w", padx=4, pady=2)
 
         ttk.Label(secenek_cerceve, text="Eşleştirme eforu:").grid(row=0, column=1, sticky="e", padx=(20, 4))
         self.var_efor = tk.StringVar(value="normal")
@@ -201,6 +204,13 @@ class MikroskopArayuzu(tk.Tk):
             if len(imgs) < 2:
                 self._log("HATA: Yeterli sayıda okunabilir görüntü yok.")
                 return
+
+            if self.var_kenar_kirp.get():
+                onceki = [im.shape[:2] for im in imgs]
+                imgs = [core.daire_alanini_kirp(im) for im in imgs]
+                kirpilan = sum(1 for once, im in zip(onceki, imgs) if im.shape[:2] != once)
+                if kirpilan:
+                    self._log(f"Siyah çevre kenarlığı {kirpilan}/{len(imgs)} görüntüde otomatik kırpıldı.")
 
             if self.var_isik.get() or self.var_vinyet.get():
                 imgs = [core.on_isle(im, vinyet=self.var_vinyet.get(), isik=self.var_isik.get()) for im in imgs]

@@ -58,6 +58,9 @@ def main():
                      help="cv2.Stitcher için: SCANS=afin/düzlemsel (önerilen), PANORAMA=perspektif")
     ap.add_argument("--vinyet-duzelt", action="store_true", help="Kenar kararmasını (vinyet) düzelt")
     ap.add_argument("--isik-esitle", action="store_true", help="CLAHE ile pozlama farklarını dengele")
+    ap.add_argument("--kenar-kirp-kapat", action="store_true",
+                     help="Oküler fotoğraflarındaki siyah çevre kenarlığını otomatik kırpmayı kapat "
+                          "(varsayılan: açık -- siyah kenarlık yoksa zaten neredeyse hiçbir şey kırpmaz)")
 
     ap.add_argument("--tek-grup", action="store_true",
                      help="Farklı objektif/büyütme tespitini kapat, tüm görüntüleri tek grup say")
@@ -73,6 +76,13 @@ def main():
 
     imgs, yollar = gorseleri_yukle(args)
     print(f"{len(imgs)} görüntü yüklendi: " + ", ".join(os.path.basename(y) for y in yollar))
+
+    if not args.kenar_kirp_kapat:
+        onceki_boyutlar = [im.shape[:2] for im in imgs]
+        imgs = [core.daire_alanini_kirp(im) for im in imgs]
+        kirpilan = sum(1 for once, im in zip(onceki_boyutlar, imgs) if im.shape[:2] != once)
+        if kirpilan:
+            print(f"Siyah çevre kenarlığı {kirpilan}/{len(imgs)} görüntüde otomatik kırpıldı.")
 
     if args.vinyet_duzelt or args.isik_esitle:
         imgs = [core.on_isle(im, vinyet=args.vinyet_duzelt, isik=args.isik_esitle) for im in imgs]

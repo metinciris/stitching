@@ -49,6 +49,49 @@ def on_isle(img, vinyet=True, isik=True):
 
 
 # --------------------------------------------------------------------------
+# TELEFON+OKÜLER SİYAH KENAR KIRPMA
+# --------------------------------------------------------------------------
+def daire_alanini_kirp(img, esik=25, kapama_oran=0.03, kenar_payi_oran=0.01,
+                        min_alan_orani=0.15):
+    """Telefonla oküler üzerinden çekilen fotoğraflardaki geniş siyah kenar
+    boşluğunu (mikroskobun dairesel görüş alanı dışını) kırpar.
+
+    Koyu renkli (yoğun boyalı) doku bölgelerinin yanlışlıkla "arka plan"
+    sayılıp maskede delik açmaması için önce morfolojik kapama ile küçük
+    boşluklar doldurulur, sonra en büyük bağlı bölgenin (dairenin) sınır
+    kutusuna kırpılır. Siyah kenarlık YOKSA (örn. sıradan bir fotoğrafsa)
+    tespit edilen alan zaten neredeyse tüm kareyi kaplayacağından kırpma
+    isteğe bağlı olarak hemen hemen hiçbir şey yapmaz -- yani varsayılan
+    olarak açık bırakmak güvenlidir.
+    """
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, ham = cv2.threshold(gray, esik, 255, cv2.THRESH_BINARY)
+
+    k = max(3, int(min(h, w) * kapama_oran)) | 1
+    cekirdek = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    kapali = cv2.morphologyEx(ham, cv2.MORPH_CLOSE, cekirdek)
+    kapali = cv2.morphologyEx(kapali, cv2.MORPH_OPEN, cekirdek)
+
+    konturlar, _ = cv2.findContours(kapali, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not konturlar:
+        return img
+
+    en_buyuk = max(konturlar, key=cv2.contourArea)
+    if cv2.contourArea(en_buyuk) < min_alan_orani * h * w:
+        return img  # şüpheli derecede küçük tespit -- dokunma
+
+    x, y, bw, bh = cv2.boundingRect(en_buyuk)
+    pay_x = int(bw * kenar_payi_oran)
+    pay_y = int(bh * kenar_payi_oran)
+    x0, y0 = max(0, x + pay_x), max(0, y + pay_y)
+    x1, y1 = min(w, x + bw - pay_x), min(h, y + bh - pay_y)
+    if x1 <= x0 or y1 <= y0:
+        return img
+    return img[y0:y1, x0:x1]
+
+
+# --------------------------------------------------------------------------
 # YÖNTEM A: cv2.Stitcher (SCANS = afin/düzlemsel, PANORAMA = perspektif)
 # --------------------------------------------------------------------------
 def opencv_stitcher_ile_birlestir(images, mod="SCANS", efor="normal"):
@@ -230,12 +273,36 @@ def _olcekten_geri_don(M_small, s_i, s_j):
     return np.hstack([A, t]).astype(np.float32)
 
 
+def _kazanc_orani_hesapla(kucuk_i, kucuk_j, M_small, parlaklik_tabani=20, min_ortak_piksel=400):
+    """i ve j görüntülerinin örtüşen bölgesindeki parlaklık farkını (pozlama/
+    yansıma farkını) ölçer. j'yi bu oranla çarpmak, örtüşen bölgede i'nin
+    parlaklık seviyesine yaklaştırır. Bu, cv2.Stitcher'ın içeride yaptığı
+    "pozlama dengeleme"nin basitleştirilmiş bir versiyonudur; bu adım
+    olmadan manuel yöntemde komşu kareler arasında görünür parlama/gölge
+    sıçramaları oluşabilir. Yetersiz örtüşme varsa 1.0 (düzeltme yok) döner."""
+    h_i, w_i = kucuk_i.shape[:2]
+    gri_i = cv2.cvtColor(kucuk_i, cv2.COLOR_BGR2GRAY)
+    gri_j = cv2.cvtColor(kucuk_j, cv2.COLOR_BGR2GRAY)
+    warped_j = cv2.warpAffine(gri_j, M_small, (w_i, h_i))
+    warped_j_mask = cv2.warpAffine(np.full(gri_j.shape, 255, dtype=np.uint8), M_small, (w_i, h_i))
+
+    ortak = (warped_j_mask > 0) & (gri_i > parlaklik_tabani) & (warped_j > parlaklik_tabani)
+    if ortak.sum() < min_ortak_piksel:
+        return 1.0
+
+    med_i = float(np.median(gri_i[ortak]))
+    med_j = float(np.median(warped_j[ortak]))
+    oran = med_i / max(med_j, 1e-3)
+    return float(np.clip(oran, 0.5, 2.0))
+
+
 def _ikili_kenarlari_bul(images, sift_det, orb_det, ayar):
     """Tüm ikili görüntü çiftleri arasında afin dönüşüm ve inlier sayısını
     hesaplar. Performans için: her görüntünün özellikleri KÜÇÜLTÜLMÜŞ halde
     ve yalnızca BİR KEZ çıkarılır (N^2 yerine N çıkarım), sonra bulunan
     dönüşüm orijinal çözünürlüğe geri ölçeklenir -- böylece hem hız hem de
-    tam çözünürlükte hassas warp/harmanlama korunur."""
+    tam çözünürlükte hassas warp/harmanlama korunur. Ayrıca her kenar için
+    örtüşen bölgedeki parlaklık (pozlama) oranı da hesaplanır."""
     n = len(images)
     min_esl = min(8, ayar["min_inlier"])
     max_boyut = ayar["max_boyut"]
@@ -275,7 +342,8 @@ def _ikili_kenarlari_bul(images, sift_det, orb_det, ayar):
             inlier_sayisi = int(inliers.sum()) if inliers is not None else len(pts_i)
             if inlier_sayisi < ayar["min_inlier"]:
                 continue
-            kenarlar.append((i, j, M, inlier_sayisi))  # M: j koordinatlarını i'ye taşır
+            kazanc_oran = _kazanc_orani_hesapla(kucukler[i], kucukler[j], M_small)
+            kenarlar.append((i, j, M, inlier_sayisi, kazanc_oran))  # M: j'yi i'ye taşır
     return kenarlar
 
 
@@ -296,35 +364,39 @@ def manuel_birlestir(images, detector=None, efor="normal", ilerleme_callback=Non
     # Maksimum yayılma ağacı: en güvenilir (en çok inlier'lı) bağlantılar önce
     uf = _BirlesikKume(n)
     agac = []
-    for (i, j, M, inl) in sorted(kenarlar, key=lambda e: -e[3]):
+    for (i, j, M, inl, kazanc_oran) in sorted(kenarlar, key=lambda e: -e[3]):
         if uf.bul(i) != uf.bul(j):
             uf.birlestir(i, j)
-            agac.append((i, j, M, inl))
+            agac.append((i, j, M, inl, kazanc_oran))
 
     derece = {}
-    for (i, j, _, _) in agac:
+    for (i, j, _, _, _) in agac:
         derece[i] = derece.get(i, 0) + 1
         derece[j] = derece.get(j, 0) + 1
     kok = max(derece, key=derece.get) if derece else 0
 
+    # komsu[düğüm] -> [(komşu, düğüm<-komşu dönüşümü, komşuyu düğüme eşleyecek parlaklık kazancı), ...]
     komsu = {}
-    for (i, j, M, inl) in agac:
-        komsu.setdefault(i, []).append((j, cv2.invertAffineTransform(M)))  # i -> j
-        komsu.setdefault(j, []).append((i, M))                             # j -> i
+    for (i, j, M, inl, kazanc_oran) in agac:
+        # kazanc_oran: j'yi çarpıp i'nin parlaklığına yaklaştıran katsayı
+        komsu.setdefault(i, []).append((j, cv2.invertAffineTransform(M), kazanc_oran))
+        komsu.setdefault(j, []).append((i, M, 1.0 / kazanc_oran))
 
     from collections import deque
     global_M = {kok: np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)}
+    kazanc = {kok: 1.0}
     ziyaret = {kok}
     kuyruk = deque([kok])
     while kuyruk:
         node = kuyruk.popleft()
-        for kom, M_kom_to_node in komsu.get(node, []):
+        for kom, M_kom_to_node, kazanc_kom_to_node in komsu.get(node, []):
             if kom in ziyaret:
                 continue
             ziyaret.add(kom)
             G_node_3 = np.vstack([global_M[node], [0, 0, 1]]).astype(np.float32)
             M_3 = np.vstack([M_kom_to_node, [0, 0, 1]]).astype(np.float32)
             global_M[kom] = (G_node_3 @ M_3)[:2, :]
+            kazanc[kom] = float(np.clip(kazanc[node] * kazanc_kom_to_node, 0.4, 2.5))
             kuyruk.append(kom)
 
     izole = [k for k in range(n) if k not in ziyaret]
@@ -362,7 +434,12 @@ def manuel_birlestir(images, detector=None, efor="normal", ilerleme_callback=Non
         M3 = np.vstack([global_M[idx], [0, 0, 1]]).astype(np.float32)
         kaydir_3 = np.vstack([kaydir, [0, 0, 1]]).astype(np.float32)
         M_final = (kaydir_3 @ M3)[:2, :]
-        warped = cv2.warpAffine(images[idx], M_final, (canvas_w, canvas_h))
+        # Örtüşen bölgelerdeki parlama/gölge (pozlama) farkını gidermek için
+        # bu görüntüye, ağaçtan hesaplanan kazanç katsayısını uygula.
+        kaynak = images[idx]
+        if abs(kazanc[idx] - 1.0) > 1e-3:
+            kaynak = np.clip(kaynak.astype(np.float32) * kazanc[idx], 0, 255).astype(np.uint8)
+        warped = cv2.warpAffine(kaynak, M_final, (canvas_w, canvas_h))
         warped_mask = cv2.warpAffine(np.full((h, w), 255, dtype=np.uint8), M_final, (canvas_w, canvas_h))
         canvas, canvas_mask_bool = canvas_uzerine_harmanla(canvas, canvas_mask, warped, warped_mask)
         canvas_mask = canvas_mask_bool.astype(np.uint8) * 255
@@ -536,6 +613,10 @@ def dosyalari_yukle(yollar):
     return imgs, gecerli_yollar
 
 
+# cv2.Stitcher, bu sayıdan fazla görüntüde denenmez (bkz. grup_birlestir notu)
+CV_STITCHER_MAKS_GORUNTU = 12
+
+
 # --------------------------------------------------------------------------
 # TEK BİR GRUP İÇİN TAM BİRLEŞTİRME AKIŞI (opencv -> başarısızsa manuel)
 # --------------------------------------------------------------------------
@@ -547,9 +628,21 @@ def grup_birlestir(images, stitcher_modu="SCANS", efor="normal"):
     görüntüleri sessizce dışarıda bırakabilir (çıktı, verilenden daha küçük
     olur). 'yuksek' eforda bu durum tespit edilip, tüm görüntüleri kapsayan
     graf-tabanlı manuel yöntemle karşılaştırılarak daha eksiksiz olan seçilir.
+
+    NOT 2: cv2.Stitcher'ın iç RANSAC/eşleştirme adımları biraz rastgelelik
+    içerir; bu yüzden çok sayıda görüntüde (özellikle >~12) bozuk bir
+    dönüşüm tahmininden dolayı bazen -try/except ile bile YAKALANAMAYAN,
+    işletim sistemi tarafından anında sonlandırılan (OOM/SIGKILL)- devasa
+    bellek talepleri oluşturabilir; bu davranış deterministik değildir
+    (aynı girdiyle bile bazen olur bazen olmaz). Bunu tamamen önlemek için,
+    büyük gruplarda cv2.Stitcher hiç denenmez; doğrudan kendi boyut-sınırlı
+    (kontrollü, asla OOM yapmayan) graf-tabanlı yönteme gidilir.
     """
     if len(images) == 1:
         return images[0], "tek-goruntu"
+
+    if len(images) > CV_STITCHER_MAKS_GORUNTU:
+        return manuel_birlestir(images, efor=efor), "manuel(graf, çok-görüntü)"
 
     status, pano_cv = opencv_stitcher_ile_birlestir(images, mod=stitcher_modu, efor=efor)
     cv_basarili = (status == cv2.Stitcher_OK) and (pano_cv is not None)
