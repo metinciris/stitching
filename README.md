@@ -86,3 +86,7 @@ kompozit üretebilirsiniz.
   zorlanabilir; dosya adlarını çekim sırasına göre numaralandırmak faydalı olur.
 - Çok sayıda (>40) fotoğrafta otomatik büyütme tespiti (ikili karşılaştırma
   yaptığı için) biraz zaman alabilir.
+- Program artık cv2.Stitcher'ın bozuk bir eşleşmeden dolayı çökmesine karşı
+  korumalı (otomatik olarak manuel yönteme düşer) ve özellik çıkarımını her
+  görüntü için yalnızca bir kez yapıp önbelleğe alır (büyük fotoğraf
+  kümelerinde eskiye göre çok daha hızlıdır).

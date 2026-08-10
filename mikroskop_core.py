@@ -61,7 +61,30 @@ def opencv_stitcher_ile_birlestir(images, mod="SCANS", efor="normal"):
         stitcher.setPanoConfidenceThresh(guven_esigi)
     except AttributeError:
         pass
-    status, pano = stitcher.stitch(images)
+
+    # cv2.Stitcher, bozuk/yanlış bir eşleşmeden dolayı bazen mantıksız
+    # derecede büyük (GB'larca) bir tuval hesaplayıp bellek hatasıyla
+    # çökebilir. Bunu burada yakalayıp "başarısız" say, manuel yönteme
+    # düşülsün -- program çökmesin.
+    try:
+        status, pano = stitcher.stitch(images)
+    except cv2.error as e:
+        print(f"[UYARI] cv2.Stitcher hata verdi (muhtemelen bozuk dönüşüm/bellek): {e}")
+        return -1, None
+    except MemoryError as e:
+        print(f"[UYARI] cv2.Stitcher bellek yetersiz hatası verdi: {e}")
+        return -1, None
+
+    # Ek güvenlik: çıktı, girdi görüntülerinin toplam alanına göre mantıksız
+    # derecede büyükse (örtüşme varsa normalde çok daha küçük olmalı) reddet.
+    if status == cv2.Stitcher_OK and pano is not None:
+        toplam_giris_alani = sum(im.shape[0] * im.shape[1] for im in images)
+        pano_alani = pano.shape[0] * pano.shape[1]
+        if pano_alani > toplam_giris_alani * 6:
+            print(f"[UYARI] cv2.Stitcher çıktısı mantıksız büyük "
+                  f"({pano.shape[1]}x{pano.shape[0]}), reddediliyor.")
+            return -1, None
+
     return status, pano
 
 
@@ -105,11 +128,19 @@ def _tespit_gorseli_hazirla(img, on_clahe):
     return g
 
 
-def ozellik_bul_eslesir(img1, img2, detector, oran_esik=0.75, min_eslesme=8, on_clahe=False):
-    g1 = _tespit_gorseli_hazirla(img1, on_clahe)
-    g2 = _tespit_gorseli_hazirla(img2, on_clahe)
-    kp1, des1 = detector.detectAndCompute(g1, None)
-    kp2, des2 = detector.detectAndCompute(g2, None)
+def ozellik_cikar(img, detector, on_clahe=False):
+    """Bir görüntüden özellik noktalarını ve tanımlayıcıları BİR KEZ çıkarır.
+    Bunu her çift için değil, her görüntü için bir kez çağırıp sonucu
+    önbelleğe almak, N görüntülük bir kümede N^2 yerine N özellik çıkarımı
+    yapılmasını sağlar (asıl performans kazancı buradan gelir)."""
+    g = _tespit_gorseli_hazirla(img, on_clahe)
+    kp, des = detector.detectAndCompute(g, None)
+    return kp, des
+
+
+def _eslestir_ve_puanla(kp1, des1, kp2, des2, oran_esik=0.75, min_eslesme=8):
+    """Önceden çıkarılmış iki özellik kümesini eşleştirir (Lowe oran testi).
+    Dönüş: (pts1, pts2) ya da yetersizse None."""
     if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
         return None
 
@@ -129,6 +160,16 @@ def ozellik_bul_eslesir(img1, img2, detector, oran_esik=0.75, min_eslesme=8, on_
     pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
     pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
     return pts1, pts2
+
+
+def ozellik_bul_eslesir(img1, img2, detector, oran_esik=0.75, min_eslesme=8, on_clahe=False):
+    """Tek bir çift için özellik çıkarma + eşleştirme (kolaylık fonksiyonu).
+    Çok sayıda görüntü karşılaştırılacaksa ozellik_cikar + _eslestir_ve_puanla
+    ayrı ayrı ve önbellekli kullanılmalı (bkz. _ikili_kenarlari_bul,
+    objektif_gruplarini_bul) -- burada her çağrıda yeniden çıkarım yapılır."""
+    kp1, des1 = ozellik_cikar(img1, detector, on_clahe)
+    kp2, des2 = ozellik_cikar(img2, detector, on_clahe)
+    return _eslestir_ve_puanla(kp1, des1, kp2, des2, oran_esik, min_eslesme)
 
 
 def canvas_uzerine_harmanla(canvas, canvas_mask, warped, warped_mask):
@@ -163,25 +204,73 @@ def _afin_uygula(pts, M):
     return (M.astype(np.float32) @ pts_h.T).T
 
 
+def _gecerli_afin_mi(M, ref_shape, min_olcek=0.35, maks_olcek=2.8, maks_oteleme_kat=12):
+    """Bir ikili eşleşmeden çıkan afin dönüşümün akla yatkın olup olmadığını
+    kontrol eder. Bozuk/yanlış eşleşmelerden doğan aşırı ölçek veya öteleme
+    değerleri, birleştirmede devasa (GB'larca bellek isteyen) tuvallere yol
+    açabilir; bu fonksiyon bu tür dönüşümleri baştan eler."""
+    if M is None:
+        return False
+    olcek = float(np.hypot(M[0, 0], M[1, 0]))
+    if not (min_olcek <= olcek <= maks_olcek):
+        return False
+    h, w = ref_shape[:2]
+    sinir = maks_oteleme_kat * max(h, w)
+    if abs(M[0, 2]) > sinir or abs(M[1, 2]) > sinir:
+        return False
+    return True
+
+
+def _olcekten_geri_don(M_small, s_i, s_j):
+    """Küçültülmüş görüntüler üzerinde hesaplanan afin dönüşümü (M_small),
+    orijinal çözünürlükteki koordinatlara taşır. s_i, s_j: i ve j
+    görüntülerinin küçültme oranları (_kucult'tan dönen)."""
+    A = M_small[:, :2] * (s_j / s_i)
+    t = M_small[:, 2:3] / s_i
+    return np.hstack([A, t]).astype(np.float32)
+
+
 def _ikili_kenarlari_bul(images, sift_det, orb_det, ayar):
+    """Tüm ikili görüntü çiftleri arasında afin dönüşüm ve inlier sayısını
+    hesaplar. Performans için: her görüntünün özellikleri KÜÇÜLTÜLMÜŞ halde
+    ve yalnızca BİR KEZ çıkarılır (N^2 yerine N çıkarım), sonra bulunan
+    dönüşüm orijinal çözünürlüğe geri ölçeklenir -- böylece hem hız hem de
+    tam çözünürlükte hassas warp/harmanlama korunur."""
     n = len(images)
     min_esl = min(8, ayar["min_inlier"])
+    max_boyut = ayar["max_boyut"]
+
+    kucukler, olcekler = [], []
+    for im in images:
+        small, s = _kucult(im, max_boyut)
+        kucukler.append(small)
+        olcekler.append(s)
+
+    ozellikler_sift = [ozellik_cikar(im, sift_det, on_clahe=ayar["on_clahe"]) for im in kucukler]
+    ozellikler_orb = ([ozellik_cikar(im, orb_det, on_clahe=ayar["on_clahe"]) for im in kucukler]
+                       if orb_det is not None else [(None, None)] * n)
+
     kenarlar = []
     for i in range(n):
         for j in range(i + 1, n):
-            eslesme = ozellik_bul_eslesir(images[i], images[j], sift_det,
-                                           oran_esik=ayar["oran_esik"], min_eslesme=min_esl,
-                                           on_clahe=ayar["on_clahe"])
+            kp_i, des_i = ozellikler_sift[i]
+            kp_j, des_j = ozellikler_sift[j]
+            eslesme = _eslestir_ve_puanla(kp_i, des_i, kp_j, des_j,
+                                           oran_esik=ayar["oran_esik"], min_eslesme=min_esl)
             if eslesme is None and orb_det is not None:
-                eslesme = ozellik_bul_eslesir(images[i], images[j], orb_det,
-                                               oran_esik=ayar["oran_esik"], min_eslesme=min_esl,
-                                               on_clahe=ayar["on_clahe"])
+                kp_i2, des_i2 = ozellikler_orb[i]
+                kp_j2, des_j2 = ozellikler_orb[j]
+                eslesme = _eslestir_ve_puanla(kp_i2, des_i2, kp_j2, des_j2,
+                                               oran_esik=ayar["oran_esik"], min_eslesme=min_esl)
             if eslesme is None:
                 continue
             pts_i, pts_j = eslesme
-            M, inliers = cv2.estimateAffinePartial2D(pts_j, pts_i, method=cv2.RANSAC,
-                                                       ransacReprojThreshold=ayar["ransac_esik"])
-            if M is None:
+            M_small, inliers = cv2.estimateAffinePartial2D(pts_j, pts_i, method=cv2.RANSAC,
+                                                             ransacReprojThreshold=ayar["ransac_esik"])
+            if M_small is None:
+                continue
+            M = _olcekten_geri_don(M_small, olcekler[i], olcekler[j])
+            if not _gecerli_afin_mi(M, images[i].shape):
                 continue
             inlier_sayisi = int(inliers.sum()) if inliers is not None else len(pts_i)
             if inlier_sayisi < ayar["min_inlier"]:
@@ -258,8 +347,9 @@ def manuel_birlestir(images, detector=None, efor="normal", ilerleme_callback=Non
     canvas_h = max(1, int(np.ceil(max_y - min_y)) + 2)
 
     # Aşırı büyük tuvali (kaçak/aykırı dönüşüm durumunda) sınırla
-    if canvas_w * canvas_h > 8000 * 8000:
-        print("[UYARI] Hesaplanan tuval anormal büyük, en büyük tekil görüntü döndürülüyor.")
+    if canvas_w > 25000 or canvas_h > 25000 or canvas_w * canvas_h > 200_000_000:
+        print(f"[UYARI] Hesaplanan tuval anormal büyük ({canvas_w}x{canvas_h}), "
+              f"en büyük tekil görüntü döndürülüyor.")
         return max(images, key=lambda im: im.shape[0] * im.shape[1])
 
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
@@ -353,14 +443,29 @@ def objektif_gruplarini_bul(images, tol_dusuk=0.8, tol_yuksek=1.25, efor="normal
     ikinci deneme yapar -> zayıf örtüşen/düşük kontrastlı gerçek fotoğraflarda
     gereksiz grup bölünmesini azaltır, ama daha uzun sürer.
 
+    Performans: her görüntünün özellikleri (küçültülmüş halde) yalnızca BİR
+    KEZ çıkarılır ve önbelleğe alınır; N^2 çift için her seferinde yeniden
+    çıkarım yapılmaz.
+
     Dönüş: (gruplar, oran_tablosu)
         gruplar: [[idx, idx, ...], ...]  -- her biri bir büyütme grubunun indeksleri
         oran_tablosu: {(i,j): (oran, inlier_sayisi)} -- teşhis/loglama için
     """
     n = len(images)
     ayar = EFOR_AYARLARI[efor]
+    min_esl = min(8, ayar["min_inlier"])
     sift_det = varsayilan_detector(efor, tip="sift")
     orb_det = varsayilan_detector(efor, tip="orb") if ayar["ikinci_deneme"] else None
+
+    kucukler, olcekler = [], []
+    for im in images:
+        small, s = _kucult(im, ayar["max_boyut"])
+        kucukler.append(small)
+        olcekler.append(s)
+
+    ozellikler_sift = [ozellik_cikar(im, sift_det, on_clahe=ayar["on_clahe"]) for im in kucukler]
+    ozellikler_orb = ([ozellik_cikar(im, orb_det, on_clahe=ayar["on_clahe"]) for im in kucukler]
+                       if orb_det is not None else [(None, None)] * n)
 
     uf = _BirlesikKume(n)
     oran_tablosu = {}
@@ -369,21 +474,30 @@ def objektif_gruplarini_bul(images, tol_dusuk=0.8, tol_yuksek=1.25, efor="normal
     yapilan = 0
     for i in range(n):
         for j in range(i + 1, n):
-            oran, inlier = gorece_olcek_tahmin_et(
-                images[i], images[j], sift_det, min_inlier=ayar["min_inlier"],
-                max_boyut=ayar["max_boyut"], oran_esik=ayar["oran_esik"],
-                ransac_esik=ayar["ransac_esik"], on_clahe=ayar["on_clahe"])
-            if oran is None and orb_det is not None:
-                oran, inlier = gorece_olcek_tahmin_et(
-                    images[i], images[j], orb_det, min_inlier=ayar["min_inlier"],
-                    max_boyut=ayar["max_boyut"], oran_esik=ayar["oran_esik"],
-                    ransac_esik=ayar["ransac_esik"], on_clahe=ayar["on_clahe"])
+            kp_i, des_i = ozellikler_sift[i]
+            kp_j, des_j = ozellikler_sift[j]
+            eslesme = _eslestir_ve_puanla(kp_i, des_i, kp_j, des_j,
+                                           oran_esik=ayar["oran_esik"], min_eslesme=min_esl)
+            if eslesme is None and orb_det is not None:
+                kp_i2, des_i2 = ozellikler_orb[i]
+                kp_j2, des_j2 = ozellikler_orb[j]
+                eslesme = _eslestir_ve_puanla(kp_i2, des_i2, kp_j2, des_j2,
+                                               oran_esik=ayar["oran_esik"], min_eslesme=min_esl)
             yapilan += 1
             if ilerleme_callback:
                 ilerleme_callback(yapilan, toplam)
-            if oran is None:
+            if eslesme is None:
                 continue
-            oran_tablosu[(i, j)] = (oran, inlier)
+            pts_i, pts_j = eslesme
+            M, inliers = cv2.estimateAffinePartial2D(pts_j, pts_i, method=cv2.RANSAC,
+                                                       ransacReprojThreshold=ayar["ransac_esik"])
+            if M is None:
+                continue
+            inlier_sayisi = int(inliers.sum()) if inliers is not None else len(pts_i)
+            if inlier_sayisi < ayar["min_inlier"]:
+                continue
+            oran = float(np.hypot(M[0, 0], M[1, 0])) * (olcekler[j] / olcekler[i])
+            oran_tablosu[(i, j)] = (oran, inlier_sayisi)
             if tol_dusuk <= oran <= tol_yuksek:
                 uf.birlestir(i, j)
 
@@ -438,7 +552,7 @@ def grup_birlestir(images, stitcher_modu="SCANS", efor="normal"):
         return images[0], "tek-goruntu"
 
     status, pano_cv = opencv_stitcher_ile_birlestir(images, mod=stitcher_modu, efor=efor)
-    cv_basarili = status == cv2.Stitcher_OK
+    cv_basarili = (status == cv2.Stitcher_OK) and (pano_cv is not None)
     cv_alan = (pano_cv.shape[0] * pano_cv.shape[1]) if cv_basarili else 0
 
     if cv_basarili and efor != "yuksek":
