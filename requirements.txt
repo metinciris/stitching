@@ -1,0 +1,5 @@
+opencv-contrib-python>=4.10
+numpy>=2.0
+scipy>=1.13
+tifffile>=2024.8
+PyQt5>=5.15.10
