@@ -84,6 +84,25 @@ MicroStitch Studio therefore emphasizes:
 
 ---
 
+## How this project was solved with AI assistance
+
+MicroStitch Studio was developed iteratively on real H&E microscope photographs rather than from a single “perfect” stitching prompt. Gemini, Claude, and ChatGPT approached the problem differently; their successes and failures helped reveal that the task was not a conventional panorama problem but a constrained microscopy-registration problem.
+
+The full engineering case study documents:
+
+- why early alpha-feathering and per-image correction approaches were insufficient,
+- how cumulative drift exposed the need for global pose optimization,
+- why symmetric matching and strict overlap validation mattered,
+- how group-based photometric correction preserved H&E appearance better,
+- why graph-cut seam ownership reduced duplicated nuclei,
+- how human pathology expertise acted as the acceptance criterion for every iteration.
+
+**Read the development story:** [`docs/AI_DEVELOPMENT_JOURNEY.md`](docs/AI_DEVELOPMENT_JOURNEY.md)
+
+For future AI coding agents and developers, see also [`AGENTS.md`](AGENTS.md).
+
+---
+
 ## Example data
 
 A complete test set is available in the repository:
@@ -223,6 +242,8 @@ stitching/
 ├─ screen.PNG
 ├─ sonuc.png
 ├─ sonuc_AI_ile.png
+├─ docs/
+│  └─ AI_DEVELOPMENT_JOURNEY.md
 ├─ microstitch/
 │  ├─ models.py
 │  ├─ matching.py
@@ -247,6 +268,7 @@ Contributions are welcome.
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) explains development and testing expectations.
 - [`AGENTS.md`](AGENTS.md) is written specifically for future developers and AI coding agents such as ChatGPT, Codex, Copilot, or similar systems.
+- [`docs/AI_DEVELOPMENT_JOURNEY.md`](docs/AI_DEVELOPMENT_JOURNEY.md) records how Gemini, Claude, ChatGPT, and human pathology review shaped the final architecture.
 
 Important project principles include preserving tissue geometry, avoiding duplicated nuclei, keeping H&E color changes conservative, separating different magnifications when appropriate, and validating registration changes against the included sample dataset.
 
@@ -262,6 +284,8 @@ Useful future directions include:
 - OpenSlide-compatible output
 - automated regression testing
 - easier packaging as a standalone Windows executable
+
+The project is intentionally optimized for a realistic manual pathology workflow with a manageable number of phone-captured fields. Extreme throughput for hundreds of manually captured images is not a primary design goal; correctness, usability, and faithful tissue reconstruction take priority.
 
 ---
 
